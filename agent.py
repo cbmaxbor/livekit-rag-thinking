@@ -182,24 +182,24 @@ async def entrypoint(ctx: JobContext) -> None:
         ############################################################
 
         # Option 2: Use a message from a specific list to indicate that we're looking up the answer
-        # thinking_messages = [
-        #     "Let me look that up...",
-        #     "One moment while I check...",
-        #     "I'll find that information for you...",
-        #     "Just a second while I search...",
-        #     "Looking into that now..."
-        # ]
-        # await agent.say(random.choice(thinking_messages))
+        thinking_messages = [
+            "Let me look that up...",
+            "One moment while I check...",
+            "I'll find that information for you...",
+            "Just a second while I search...",
+            "Looking into that now..."
+        ]
+        await agent.say(random.choice(thinking_messages))
 
-        # Option 3: Make a call to the LLM with a copied context to generate a custom message
-        async with _chat_ctx_lock:
-            thinking_ctx = llm.ChatContext().append(
-                role="system",
-                text="Generate a very short message to indicate that we're looking up the answer in the docs"
-            )
-            thinking_stream = agent._llm.chat(chat_ctx=thinking_ctx)
-            # Wait for thinking message to complete before proceeding
-            await agent.say(thinking_stream, add_to_chat_ctx=False)
+        # Option 3: Make a call to the LLM to generate a custom message for this specific function call
+        # async with _chat_ctx_lock:
+        #     thinking_ctx = llm.ChatContext().append(
+        #         role="system",
+        #         text="Generate a very short message to indicate that we're looking up the answer in the docs"
+        #     )
+        #     thinking_stream = agent._llm.chat(chat_ctx=thinking_ctx)
+        #     # Wait for thinking message to complete before proceeding
+        #     await agent.say(thinking_stream, add_to_chat_ctx=False)
 
         # Option 4: Play an audio file through the room's audio track
         # await play_wav_once("let_me_check_that.wav", ctx.room)
