@@ -21,6 +21,8 @@ EMBEDDINGS_DIMENSION = 1536
 INDEX_PATH = "vdb_data"
 DATA_PATH = "my_data.pkl"
 
+# Add chat context lock
+_chat_ctx_lock = asyncio.Lock()
 
 annoy_index = rag.annoy.AnnoyIndex.load(INDEX_PATH)
 with open(DATA_PATH, "rb") as f:
@@ -37,10 +39,11 @@ async def _enrich_with_rag(agent: VoicePipelineAgent, chat_ctx: llm.ChatContext)
     Locate the last user message, use it to query the RAG model for
     the most relevant paragraph, add that to context, and generate a response.
     """
-    user_msg = chat_ctx.messages[-1]
+    async with _chat_ctx_lock:
+        user_msg = chat_ctx.messages[-1]
 
-    # Let's sleep for 3 seconds to simulate a delay
-    await asyncio.sleep(3)
+    # Let's sleep for 5 seconds to simulate a delay
+    await asyncio.sleep(5)
 
     user_embedding = await openai.create_embeddings(
         input=[user_msg.content],
@@ -57,13 +60,15 @@ async def _enrich_with_rag(agent: VoicePipelineAgent, chat_ctx: llm.ChatContext)
             text="Context:\n" + paragraph,
             role="assistant",
         )
-        # Replace last message with RAG, then append user message at the end
-        chat_ctx.messages[-1] = rag_msg
-        chat_ctx.messages.append(user_msg)
+        
+        async with _chat_ctx_lock:
+            # Replace last message with RAG, then append user message at the end
+            chat_ctx.messages[-1] = rag_msg
+            chat_ctx.messages.append(user_msg)
 
-        # Generate a response using the enriched context
-        llm_stream = agent._llm.chat(chat_ctx=chat_ctx)
-        await agent.say(llm_stream)
+            # Generate a response using the enriched context
+            llm_stream = agent._llm.chat(chat_ctx=chat_ctx)
+            await agent.say(llm_stream)
 
 async def play_wav_once(wav_path: str | Path, room: rtc.Room, volume: float = 0.3):
     """
@@ -150,7 +155,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 "Use any provided context to answer the user's question if needed."
                 "Never start a sentence with phrases like 'Sure' or 'I can do that' or 'I can help with that'. Instead, just start with the answer."
                 # "Option 1: Include this in the system prompt to make the agent say that it's looking up the answer w/ every function call. This doesn't always work, but is the simplest solution."
-                "If you need to perform a function call, always tell the user that you are looking up the answer."
+                # "If you need to perform a function call, always tell the user that you are looking up the answer."
             ),
         ),
         vad=silero.VAD.load(),
@@ -186,13 +191,15 @@ async def entrypoint(ctx: JobContext) -> None:
         # ]
         # await agent.say(random.choice(thinking_messages))
 
-        # Option 3: Make a call to the LLM with a copied context to generate a custom message for this specific function call
-        # temp_ctx = agent.chat_ctx.copy().append(
-        #     role="system",
-        #     text="Generate a message to indicate that we're looking up the answer in the LiveKit docs"
-        # )
-        # thinking_stream = agent._llm.chat(chat_ctx=temp_ctx)
-        # await agent.say(thinking_stream, add_to_chat_ctx=False)
+        # Option 3: Make a call to the LLM with a copied context to generate a custom message
+        async with _chat_ctx_lock:
+            thinking_ctx = llm.ChatContext().append(
+                role="system",
+                text="Generate a very short message to indicate that we're looking up the answer in the docs"
+            )
+            thinking_stream = agent._llm.chat(chat_ctx=thinking_ctx)
+            # Wait for thinking message to complete before proceeding
+            await agent.say(thinking_stream, add_to_chat_ctx=False)
 
         # Option 4: Play an audio file through the room's audio track
         # await play_wav_once("let_me_check_that.wav", ctx.room)
