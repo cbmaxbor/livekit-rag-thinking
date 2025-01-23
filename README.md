@@ -17,6 +17,7 @@ This demo showcases different approaches to handling the delay during RAG (Retri
 - Python 3.10+
 - OpenAI API key
 - LiveKit API key and secret
+- Deepgram API Key
 
 ## Setup
 
@@ -35,6 +36,7 @@ This demo showcases different approaches to handling the delay during RAG (Retri
    OPENAI_API_KEY=your_openai_api_key
    LIVEKIT_API_KEY=your_livekit_api_key
    LIVEKIT_API_SECRET=your_livekit_api_secret
+   DEEPGRAM_API_KEY=your_deepgram_api_key
    ```
 
 ## Usage
