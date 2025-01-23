@@ -77,7 +77,7 @@ The demo implements four different approaches to handle the RAG lookup delay:
 1. **System Prompt**
    - Instructs the agent through the system prompt to always announce when it's looking up information
    - Most seamless integration with the agent's behavior
-   - Consistent messaging that feels natural
+   - A little bit flaky depending on the model, not every model will follow the system instructions well enough to be consistent. 
 
 2. **Static Text Messages**
    - Uses a predefined list of responses like "Let me look that up..." or "One moment while I check..."
