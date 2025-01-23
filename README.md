@@ -14,7 +14,7 @@ This demo showcases different approaches to handling the delay during RAG (Retri
 
 ## Prerequisites
 
-- Python 3.8+
+- Python 3.10+
 - OpenAI API key
 - LiveKit API key and secret
 
@@ -70,21 +70,26 @@ This demo showcases different approaches to handling the delay during RAG (Retri
 
 ## Delay Handling Options
 
-The demo implements three different approaches to handle the RAG lookup delay:
+The demo implements four different approaches to handle the RAG lookup delay:
 
-1. **Static Text Messages**
+1. **System Prompt**
+   - Instructs the agent through the system prompt to always announce when it's looking up information
+   - Most seamless integration with the agent's behavior
+   - Consistent messaging that feels natural
+
+2. **Static Text Messages**
    - Uses a predefined list of responses like "Let me look that up..." or "One moment while I check..."
    - Simple to implement and customize
    - Consistent user experience
 
-2. **Dynamic LLM Responses**
+3. **Dynamic LLM Responses**
    - Generates unique "thinking" messages using the LLM
    - More varied and contextual responses
    - Slightly higher latency and cost
 
-3. **Audio File Playback**
+4. **Audio File Playback**
    - Plays a pre-recorded audio message
    - Most rigid option
    - Can play sounds other than speech
 
-You can experiment with these options by uncommenting the desired section in the `enrich_with_rag` function in `agent.py`.
+You can experiment with these options by uncommenting the desired section in the `enrich_with_rag` function in `agent.py`. The system prompt option is enabled by default in the current implementation.

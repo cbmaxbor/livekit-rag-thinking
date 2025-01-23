@@ -26,6 +26,12 @@ annoy_index = rag.annoy.AnnoyIndex.load(INDEX_PATH)
 with open(DATA_PATH, "rb") as f:
     paragraphs_by_uuid = pickle.load(f)
 
+# Cache for wav file data to avoid repeated disk reads
+_wav_cache = {}
+# Cache for audio track and source
+_wav_audio_track = None
+_wav_audio_source = None
+
 async def _enrich_with_rag(agent: VoicePipelineAgent, chat_ctx: llm.ChatContext) -> None:
     """
     Locate the last user message, use it to query the RAG model for
@@ -62,33 +68,42 @@ async def _enrich_with_rag(agent: VoicePipelineAgent, chat_ctx: llm.ChatContext)
 async def play_wav_once(wav_path: str | Path, room: rtc.Room, volume: float = 0.3):
     """
     Simple function to play a WAV file once through a LiveKit audio track
-    This is only needed for the "Option 3" thinking messagein the entrypoint function.
+    This is only needed for the "Option 3" thinking message in the entrypoint function.
     """
+    global _wav_audio_track, _wav_audio_source
     samples_per_channel = 9600
     wav_path = Path(wav_path)
     
-    # Create audio source and track
-    audio_source = rtc.AudioSource(48000, 1)
-    audio_track = rtc.LocalAudioTrack.create_audio_track("wav_audio", audio_source)
-    
-    # Publish the track
-    await room.local_participant.publish_track(
-        audio_track,
-        rtc.TrackPublishOptions(
-            source=rtc.TrackSource.SOURCE_MICROPHONE,
-            stream="wav_audio"
-        )
-    )
-    
-    # Small delay to ensure track is established
-    await asyncio.sleep(0.5)
-    
-    with wave.open(str(wav_path), 'rb') as wav_file:
-        audio_data = wav_file.readframes(wav_file.getnframes())
-        audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+    # Create audio source and track if they don't exist
+    if _wav_audio_track is None:
+        _wav_audio_source = rtc.AudioSource(48000, 1)
+        _wav_audio_track = rtc.LocalAudioTrack.create_audio_track("wav_audio", _wav_audio_source)
         
-        if wav_file.getnchannels() == 2:
-            audio_array = audio_array.reshape(-1, 2).mean(axis=1)
+        # Only publish the track once
+        await room.local_participant.publish_track(
+            _wav_audio_track,
+            rtc.TrackPublishOptions(
+                source=rtc.TrackSource.SOURCE_MICROPHONE,
+                stream="wav_audio"
+            )
+        )
+        
+        # Small delay to ensure track is established
+        await asyncio.sleep(0.5)
+    
+    try:
+        # Use cached audio data if available
+        if str(wav_path) not in _wav_cache:
+            with wave.open(str(wav_path), 'rb') as wav_file:
+                audio_data = wav_file.readframes(wav_file.getnframes())
+                audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+                
+                if wav_file.getnchannels() == 2:
+                    audio_array = audio_array.reshape(-1, 2).mean(axis=1)
+                
+                _wav_cache[str(wav_path)] = audio_array
+        
+        audio_array = _wav_cache[str(wav_path)]
         
         for i in range(0, len(audio_array), samples_per_channel):
             chunk = audio_array[i:i + samples_per_channel]
@@ -99,7 +114,7 @@ async def play_wav_once(wav_path: str | Path, room: rtc.Room, volume: float = 0.
             chunk = np.tanh(chunk / 32768.0) * 32768.0
             chunk = np.round(chunk * volume).astype(np.int16)
             
-            await audio_source.capture_frame(rtc.AudioFrame(
+            await _wav_audio_source.capture_frame(rtc.AudioFrame(
                 data=chunk.tobytes(),
                 sample_rate=48000,
                 samples_per_channel=samples_per_channel,
@@ -107,6 +122,16 @@ async def play_wav_once(wav_path: str | Path, room: rtc.Room, volume: float = 0.
             ))
             
             await asyncio.sleep((samples_per_channel / 48000) * 0.98)
+    except Exception as e:
+        # If something goes wrong, clean up the track and source so they can be recreated
+        if _wav_audio_track:
+            await _wav_audio_track.stop()
+            await room.local_participant.unpublish_track(_wav_audio_track)
+        if _wav_audio_source:
+            _wav_audio_source.close()
+        _wav_audio_track = None
+        _wav_audio_source = None
+        raise e
 
 async def entrypoint(ctx: JobContext) -> None:
     """
@@ -124,6 +149,8 @@ async def entrypoint(ctx: JobContext) -> None:
                 "Keep responses short and concise. Avoid unpronounceable punctuation. "
                 "Use any provided context to answer the user's question if needed."
                 "Never start a sentence with phrases like 'Sure' or 'I can do that' or 'I can help with that'. Instead, just start with the answer."
+                # "Option 1: Include this in the system prompt to make the agent say that it's looking up the answer w/ every function call. This doesn't always work, but is the simplest solution."
+                "If you need to perform a function call, always tell the user that you are looking up the answer."
             ),
         ),
         vad=silero.VAD.load(),
@@ -136,17 +163,20 @@ async def entrypoint(ctx: JobContext) -> None:
     @fnc_ctx.ai_callable()
     async def enrich_with_rag(
         code: Annotated[
-            int, llm.TypeInfo(description="Enrich with RAG for questions about LiveKit")
+            int, llm.TypeInfo(description="Enrich with RAG for questions about LiveKit.")
         ]
     ):
-        """Called when you need to enrich with RAG for questions about LiveKit."""
+        """
+        Called when you need to enrich with RAG for questions about LiveKit.
+        """
         logger.info("Enriching with RAG for questions about LiveKit")
 
         ############################################################
         # Options for thinking messages
+        # Option 1 is included in the system prompt
         ############################################################
 
-        # Option 1: Use a message from a specific list to indicate that we're looking up the answer
+        # Option 2: Use a message from a specific list to indicate that we're looking up the answer
         # thinking_messages = [
         #     "Let me look that up...",
         #     "One moment while I check...",
@@ -156,15 +186,15 @@ async def entrypoint(ctx: JobContext) -> None:
         # ]
         # await agent.say(random.choice(thinking_messages))
 
-        # Option 2: Make a call to the LLM with a copied context
+        # Option 3: Make a call to the LLM with a copied context to generate a custom message for this specific function call
         # temp_ctx = agent.chat_ctx.copy().append(
         #     role="system",
-        #     text="Generate a message to indicate that we're looking up the answer"
+        #     text="Generate a message to indicate that we're looking up the answer in the LiveKit docs"
         # )
         # thinking_stream = agent._llm.chat(chat_ctx=temp_ctx)
         # await agent.say(thinking_stream, add_to_chat_ctx=False)
 
-        # Option 3: Play an audio file through the room's audio track
+        # Option 4: Play an audio file through the room's audio track
         # await play_wav_once("let_me_check_that.wav", ctx.room)
 
         ############################################################
@@ -179,4 +209,5 @@ async def entrypoint(ctx: JobContext) -> None:
     await agent.say("Hey, how can I help you today?", allow_interruptions=True)
 
 if __name__ == "__main__":
+
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
