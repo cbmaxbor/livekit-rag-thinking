@@ -3,6 +3,8 @@ import pickle
 import asyncio
 import random
 import wave
+
+import chromadb
 import numpy as np
 from typing import Annotated
 from pathlib import Path
@@ -11,9 +13,9 @@ from livekit import rtc
 from dotenv import load_dotenv
 from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli, llm
 from livekit.agents.pipeline import VoicePipelineAgent
-from livekit.plugins import deepgram, openai, rag, silero
+from livekit.plugins import deepgram, openai, rag, silero, elevenlabs, turn_detector, noise_cancellation
 
-load_dotenv()
+load_dotenv(dotenv_path=".env.local")
 
 logger = logging.getLogger("rag-assistant")
 
@@ -33,6 +35,10 @@ _wav_cache = {}
 # Cache for audio track and source
 _wav_audio_track = None
 _wav_audio_source = None
+
+db_client = chromadb.PersistentClient(path="./chroma")
+
+collection = db_client.get_or_create_collection(name="realty_offers")
 
 async def _enrich_with_rag(agent: VoicePipelineAgent, chat_ctx: llm.ChatContext) -> None:
     """
@@ -54,10 +60,19 @@ async def _enrich_with_rag(agent: VoicePipelineAgent, chat_ctx: llm.ChatContext)
     result = annoy_index.query(user_embedding[0].embedding, n=1)[0]
     paragraph = paragraphs_by_uuid[result.userdata]
 
-    if paragraph:
-        logger.info(f"enriching with RAG: {paragraph}")
+    results = collection.query(
+        query_texts=[user_msg.content],
+        n_results=5
+    )
+
+    relevant_documents = "\n".join(results["documents"][0])
+
+    if relevant_documents:
+        logger.info(f"enriching with RAG: {relevant_documents}")
         rag_msg = llm.ChatMessage.create(
-            text="Context:\n" + paragraph,
+            text=f"""Context:\n```xml
+       {relevant_documents}
+       ```""",
             role="assistant",
         )
         
@@ -70,73 +85,6 @@ async def _enrich_with_rag(agent: VoicePipelineAgent, chat_ctx: llm.ChatContext)
             llm_stream = agent._llm.chat(chat_ctx=chat_ctx)
             await agent.say(llm_stream)
 
-async def play_wav_once(wav_path: str | Path, room: rtc.Room, volume: float = 0.3):
-    """
-    Simple function to play a WAV file once through a LiveKit audio track
-    This is only needed for the "Option 3" thinking message in the entrypoint function.
-    """
-    global _wav_audio_track, _wav_audio_source
-    samples_per_channel = 9600
-    wav_path = Path(wav_path)
-    
-    # Create audio source and track if they don't exist
-    if _wav_audio_track is None:
-        _wav_audio_source = rtc.AudioSource(48000, 1)
-        _wav_audio_track = rtc.LocalAudioTrack.create_audio_track("wav_audio", _wav_audio_source)
-        
-        # Only publish the track once
-        await room.local_participant.publish_track(
-            _wav_audio_track,
-            rtc.TrackPublishOptions(
-                source=rtc.TrackSource.SOURCE_MICROPHONE,
-                stream="wav_audio"
-            )
-        )
-        
-        # Small delay to ensure track is established
-        await asyncio.sleep(0.5)
-    
-    try:
-        # Use cached audio data if available
-        if str(wav_path) not in _wav_cache:
-            with wave.open(str(wav_path), 'rb') as wav_file:
-                audio_data = wav_file.readframes(wav_file.getnframes())
-                audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
-                
-                if wav_file.getnchannels() == 2:
-                    audio_array = audio_array.reshape(-1, 2).mean(axis=1)
-                
-                _wav_cache[str(wav_path)] = audio_array
-        
-        audio_array = _wav_cache[str(wav_path)]
-        
-        for i in range(0, len(audio_array), samples_per_channel):
-            chunk = audio_array[i:i + samples_per_channel]
-            
-            if len(chunk) < samples_per_channel:
-                chunk = np.pad(chunk, (0, samples_per_channel - len(chunk)))
-            
-            chunk = np.tanh(chunk / 32768.0) * 32768.0
-            chunk = np.round(chunk * volume).astype(np.int16)
-            
-            await _wav_audio_source.capture_frame(rtc.AudioFrame(
-                data=chunk.tobytes(),
-                sample_rate=48000,
-                samples_per_channel=samples_per_channel,
-                num_channels=1
-            ))
-            
-            await asyncio.sleep((samples_per_channel / 48000) * 0.98)
-    except Exception as e:
-        # If something goes wrong, clean up the track and source so they can be recreated
-        if _wav_audio_track:
-            await _wav_audio_track.stop()
-            await room.local_participant.unpublish_track(_wav_audio_track)
-        if _wav_audio_source:
-            _wav_audio_source.close()
-        _wav_audio_track = None
-        _wav_audio_source = None
-        raise e
 
 async def entrypoint(ctx: JobContext) -> None:
     """
@@ -159,9 +107,28 @@ async def entrypoint(ctx: JobContext) -> None:
             ),
         ),
         vad=silero.VAD.load(),
-        stt=deepgram.STT(),
-        llm=openai.LLM(),
-        tts=openai.TTS(),
+        stt=openai.stt.STT(detect_language=True, model='gpt-4o-mini-transcribe'),
+        llm=openai.LLM(model="gpt-4o-mini-2024-07-18"),
+        tts=elevenlabs.tts.TTS(
+            model="eleven_turbo_v2_5",
+            voice=elevenlabs.tts.Voice(
+                id="EXAVITQu4vr4xnSDxMaL",
+                name="Bella",
+                category="premade",
+                settings=elevenlabs.tts.VoiceSettings(
+                    stability=0.71,
+                    similarity_boost=0.5,
+                    style=0.0,
+                    use_speaker_boost=True
+                ),
+            ),
+            language="en",
+            streaming_latency=3,
+            enable_ssml_parsing=False,
+            chunk_length_schedule=[80, 120, 200, 260],
+        ),
+        turn_detector=turn_detector.EOUModel(),
+        noise_cancellation=noise_cancellation.BVC(),
         fnc_ctx=fnc_ctx,
     )
 

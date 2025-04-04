@@ -3,3 +3,6 @@ venv/
 __pycache__/
 my_data.pkl
 vdb_data/
+.idea
+.env.local
+chroma
